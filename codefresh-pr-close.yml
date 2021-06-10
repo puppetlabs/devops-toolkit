@@ -36,7 +36,12 @@ spec:
         - echo "APP_ID=$APP_ID" >> /codefresh/volume/env_vars_to_export
         - git reset --hard origin/master
         - git clean -xdf
-        - git checkout -b "${APP_ID}-cleanup" || git checkout "${APP_ID}-cleanup"
+        - |
+          if [ "$(git branch --list ${APP_ID}-cleanup)" ]
+          then
+            git branch -D ${APP_ID}-cleanup
+          fi
+        - git checkout -b "${APP_ID}-cleanup"
         - rm -f helm/templates/$APP_ID.yaml
         - git add .
         - git status

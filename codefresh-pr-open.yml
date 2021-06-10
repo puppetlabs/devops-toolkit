@@ -65,22 +65,25 @@ spec:
         git: github
       stage: deploy
     define_preview:
-      image: vfarcic/argocd-pipeline:1.0.ee76b7a
       title: Defining preview environment app
+      type: freestyle
       working_directory: "${{clone_env_repo}}"
-      commands:
-      - set -e
-      - export IMAGE_TAG='${{CF_SHORT_REVISION}}'
-      - export HELM_REPO_BASE='gcr.io/gene-for-testing'
-      - export HELM_REPO_IMAGE_PATH='ci/dio/devops-toolkit'
-      - export INGRESS_DOMAIN='34.127.3.4.sslip.io'
-      - echo "INGRESS_DOMAIN=$INGRESS_DOMAIN" >> /codefresh/volume/env_vars_to_export
-      - git reset --hard origin/master
-      - git clean -xdf
-      - git checkout ${{APP_ID}} || git checkout -b ${{APP_ID}}
-      - cat $REPO_PATH/preview.yaml | kyml tmpl -e APP_ID -e BRANCH_NAME -e IMAGE_TAG -e HELM_REPO_BASE -e HELM_REPO_IMAGE_PATH -e INGRESS_DOMAIN | tee helm/templates/$APP_ID.yaml
-      - git add .
-      - git status
+      arguments:
+        image:  gcr.io/gene-for-testing/ci/dio/dio-argocd-preview-helper:latest
+        shell: bash
+        commands:
+          - set -e
+          - export IMAGE_TAG='${{CF_SHORT_REVISION}}'
+          - export HELM_REPO_BASE='gcr.io/gene-for-testing'
+          - export HELM_REPO_IMAGE_PATH='ci/dio/devops-toolkit'
+          - export INGRESS_DOMAIN='34.127.3.4.sslip.io'
+          - echo "INGRESS_DOMAIN=$INGRESS_DOMAIN" >> /codefresh/volume/env_vars_to_export
+          - git reset --hard origin/master
+          - git clean -xdf
+          - preview-branch-prep ${APP_ID}
+          - cat $REPO_PATH/preview.yaml | kyml tmpl -e APP_ID -e BRANCH_NAME -e IMAGE_TAG -e HELM_REPO_BASE -e HELM_REPO_IMAGE_PATH -e INGRESS_DOMAIN | tee helm/templates/$APP_ID.yaml
+          - git add .
+          - git status
       stage: deploy
     push_env_repo:
       title: Pushing preview env. changes to the repo
@@ -113,36 +116,17 @@ spec:
       type: freestyle
       working_directory: "${{clone_env_repo}}"
       arguments:
-        image: 'debian:buster-slim'
+        image: 'gcr.io/gene-for-testing/ci/dio/dio-argocd-preview-helper:latest'
+        shell: bash
         commands:
-          - apt-get update -qq && apt-get install -y hub
-          - export CURRENT_SHA=$(git rev-parse HEAD)
           - hub --version
+          - export CURRENT_SHA=$(git rev-parse HEAD)
           - export GH_PREVEIW_PR=$(hub pr list |grep "for ${{APP_ID}}" |tr -s ' ' |cut -d ' ' -f2 |cut -d '#' -f2)
           - echo "GH_PREVEIW_PR=$GH_PREVEIW_PR" >> /codefresh/volume/env_vars_to_export
-          - echo
           - echo "The PR opened in the last step is number $GH_PREVEIW_PR"
-          - echo
           - sleep 15 # give CI a chance to kick off before checking its status
-          - export s=0
-          - |
-            while [ $s -lt 600 ]
-            do
-              ((s=s+10))
-              gh_ci_status=$(hub ci-status $CURRENT_SHA || echo -n)
-              if [ "$gh_ci_status" = 'success' ]; then
-                echo "CI reports success"
-                break
-              elif [ "$gh_ci_status" = 'no status' ]; then
-                echo "It seems no CI jobs are configured, moving on."
-                break
-              elif [ "$gh_ci_status" = 'failure' ]; then
-                echo "CI failed, exiting"
-                exit 1
-              else
-                sleep 10
-              fi
-            done
+          - echo "The current sha is ${CURRENT_SHA}"
+          - wait-for-gh-ci $CURRENT_SHA
       stage: deploy
     merge_github_pr:
       type: github-pr
