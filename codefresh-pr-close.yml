@@ -1,0 +1,134 @@
+version: "1.0"
+kind: pipeline
+metadata:
+  name: devops-toolkit-pr-close
+  description: Triggered when a PR is closed
+spec:
+  triggers:
+  - type: git
+    provider: github
+    context: github
+    name: pr-close
+    repo: puppetlabs/devops-toolkit
+    events:
+    - pullrequest.closed
+    pullRequestAllowForkEvents: true
+    pullRequestTargetBranchRegex: /master/gi
+    verified: true
+  contexts: []
+  stages:
+    - deploy
+    - cleanup
+  steps:
+    clone_env_repo:
+      title: Cloning preview env. repo
+      type: git-clone
+      arguments:
+        git: github
+        repo: puppetlabs/argocd-previews
+      stage: deploy
+    remove_preview:
+      image: 'vfarcic/argocd-pipeline:1.0.ee76b7a'
+      title: Removing preview environment app
+      working_directory: '${{clone_env_repo}}'
+      commands:
+        - export APP_ID=pr-$CF_REPO_NAME-$CF_PULL_REQUEST_NUMBER
+        - echo "APP_ID=$APP_ID" >> /codefresh/volume/env_vars_to_export
+        - git reset --hard origin/master
+        - git clean -xdf
+        - git checkout -b "${APP_ID}-cleanup" || git checkout "${APP_ID}-cleanup"
+        - rm -f helm/templates/$APP_ID.yaml
+        - git add .
+        - git status
+      stage: deploy
+    push_env_repo:
+      title: Push preview env. changes to the repo
+      type: git-commit
+      arguments:
+        repo: puppetlabs/argocd-previews
+        git: github
+        commit_message: 'Adding PR ${{CF_PULL_REQUEST_NUMBER}} from ${{CF_REPO_NAME}}'
+        git_user_name: '${{CF_COMMIT_AUTHOR}}'
+        working_directory: /codefresh/volume/argocd-previews
+      stage: deploy
+    get_git_token:
+      title: Reading GitHub token
+      image: codefresh/cli
+      commands:
+        - cf_export GITHUB_TOKEN=$(codefresh get context github --decrypt -o yaml | yq -y .spec.data.auth.password)
+      stage: deploy
+    create_github_pr:
+      type: github-pr
+      arguments:
+        GITHUB_TOKEN: '${{GITHUB_TOKEN}}'
+        GITHUB_REPO_OWNER: puppetlabs
+        GITHUB_REPO_NAME: argocd-previews
+        HEAD: '${{APP_ID}}-cleanup'
+        TITLE: 'Codefresh PR removing ${{APP_ID}}'
+        BASE: master
+      stage: deploy
+    wait_for_pr_ci:
+      title: Wait for CI on pr to puppetlabs/argocd-previews
+      type: freestyle
+      working_directory: "${{clone_env_repo}}"
+      arguments:
+        image: 'debian:buster-slim'
+        commands:
+          - apt-get update -qq && apt-get install -y hub
+          - export CURRENT_SHA=$(git rev-parse HEAD)
+          - hub --version
+          - export GH_PREVEIW_PR=$(hub pr list |grep "removing ${{APP_ID}}" |tr -s ' ' |cut -d ' ' -f2 |cut -d '#' -f2)
+          - echo "GH_PREVEIW_PR=$GH_PREVEIW_PR" >> /codefresh/volume/env_vars_to_export
+          - echo
+          - echo "The PR opened in the last step is number $GH_PREVEIW_PR"
+          - echo
+          - sleep 15 # give CI a chance to kick off before checking its status
+          - export s=0
+          - |
+            while [ $s -lt 600 ]
+            do
+              ((s=s+10))
+              gh_ci_status=$(hub ci-status $CURRENT_SHA || echo -n)
+              if [ "$gh_ci_status" = 'success' ]; then
+                echo "CI reports success"
+                break
+              elif [ "$gh_ci_status" = 'no status' ]; then
+                echo "It seems no CI jobs are configured, moving on."
+                break
+              elif [ "$gh_ci_status" = 'failure' ]; then
+                echo "CI failed, exiting"
+                exit 1
+              else
+                sleep 10
+              fi
+            done
+      stage: deploy
+    merge_github_pr:
+      type: github-pr
+      arguments:
+        GITHUB_TOKEN: '${{GITHUB_TOKEN}}'
+        GITHUB_REPO_OWNER: puppetlabs
+        GITHUB_REPO_NAME: argocd-previews
+        GITHUB_PR_NUMBER: '${{GH_PREVEIW_PR}}'
+        GITHUB_PR_OPERATION: merge
+      stage: deploy
+    # argocd_sync_and_wait_previews:
+    #   title: Sync ArgoCD previews app-of-apps and wait until healthy
+    #   type: argocd-sync
+    #   arguments:
+    #     context: argocd-gene-test-1
+    #     app_name: previews
+    #     wait_healthy: true
+    #   stage: cleanup
+    # delete_namespace:
+    #   title: Delete app
+    #   type: helm
+    #   arguments:
+    #     action: auth
+    #     helm_version: 3.2.4
+    #     kube_context: gene-test-1
+    #     namespace: '${{APP_ID}}'
+    #     commands:
+    #       - kubectl delete namespace ${{APP_ID}}
+    #   stage: cleanup
+
